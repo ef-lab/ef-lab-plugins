@@ -138,17 +138,49 @@ class OpenField(Behavior, dj.Manual):
 
         self._initialize_dlc()
 
+    def _get_openfield_camera(self):
+        """Return the openfield camera (the one DLC consumes frames from).
+
+        DLC's corner detector and pose estimator both pull from a single
+        camera — the one with ``video_aim='openfield'``. Other cameras
+        configured for this setup (e.g. a passive ``'eye'`` camera) just
+        record to disk and must not be confused with the openfield camera.
+
+        Cameras are keyed as ``f"{video_aim}_{camera_idx}"`` in
+        ``Interface.cameras`` (stable per-physical-camera identity across
+        sessions), so we filter by the ``openfield_`` prefix.
+
+        Raises:
+            ValueError: if no camera with ``video_aim='openfield'`` is
+                configured, or if more than one is (DLC requires exactly one).
+        """
+        cameras = self.interface.cameras
+        matches = {k: c for k, c in cameras.items() if k.startswith("openfield_")}
+        if not matches:
+            configured = list(cameras.keys()) or "<none>"
+            raise ValueError(
+                "No camera with video_aim='openfield' is configured for this "
+                f"setup. Configured keys: {configured}. Add a row to "
+                "SetupConfiguration.Camera with video_aim='openfield' for the "
+                "camera DLC should track."
+            )
+        if len(matches) > 1:
+            raise ValueError(
+                f"Multiple openfield cameras configured: {list(matches.keys())}. "
+                "DLC requires exactly one camera with video_aim='openfield'."
+            )
+        return next(iter(matches.values()))
+
     def _initialize_dlc(self) -> None:
         """Initialize the DeepLabCut (DLC) object for pose estimation."""
-        if self.interface.camera is None:
-            raise ValueError("Camera is not initialized")
+        openfield_cam = self._get_openfield_camera()
         corners, affine_matrix = self.get_corners()
         dlc_body_path = self.logger.get(schema='interface',
                                                table='SetupConfigurationArena.Models',
                                                fields=['path'],
                                                key={'setup_conf_idx': self.exp.session_params['setup_conf_idx'],
                                                     'target': 'bodyparts'})[0]
-        self.dlc = DLCContinuousPoseEstimator(frame_queue=self.interface.camera.process_queue,
+        self.dlc = DLCContinuousPoseEstimator(frame_queue=openfield_cam.process_queue,
                                               model_path=dlc_body_path,
                                               logger=self.logger,
                                               shared_memory_conf=self.shm_conf,
@@ -362,7 +394,8 @@ class OpenField(Behavior, dj.Manual):
                                            fields=['path'],
                                            key={'setup_conf_idx': self.exp.session_params['setup_conf_idx'],
                                                 'target': 'corners'})[0]
-        dlcCorners = DLCCornerDetector(frame_queue=self.interface.camera.process_queue,
+        openfield_cam = self._get_openfield_camera()
+        dlcCorners = DLCCornerDetector(frame_queue=openfield_cam.process_queue,
                                        model_path=dlc_corners_path,
                                        arena_size=self.arena_size,
                                        result=corners_dict,
