@@ -361,10 +361,28 @@ class Panda(Stimulus, dj.Manual):
             os.remove(f)
 
     def get_cond(self, cond_name, idx=0):
+        """Extract the cond_name prefix conditions.
+
+        ``self.curr_cond`` is a flat dict holding the whole trial (lights,
+        background, and every object field prefixed with ``cond_name``, e.g.
+        ``"obj_"``). This returns just the fields for object ``idx``, with the
+        prefix stripped, so an ``Agent`` can read ``cond["mag"]`` instead of
+        ``cond["obj_mag"]``.
+
+        For each matching field:
+          - a scalar value is shared by every object (returned as-is);
+          - a sequence (tuple/list/array) is treated as one value per object,
+            so object ``idx`` gets ``v[idx]``.
+
+        Args:
+            cond_name: Field prefix to select and strip (e.g. ``"obj_"``).
+            idx: Index of the object whose values to pick from sequence fields.
+
+        Returns:
+            A dict of de-prefixed field names mapped to this object's value.
+        """
         return {
-            k.split(cond_name, 1)[1]: v
-            if type(v) is int or type(v) is float
-            else v[idx]
+            k.split(cond_name, 1)[1]: (v if np.ndim(v) == 0 else v[idx])
             for k, v in self.curr_cond.items()
             if k.startswith(cond_name)
         }
