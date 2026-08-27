@@ -202,9 +202,7 @@ class InterTrial(Experiment):
     def next(self):
         if self.is_stopped():
             return "Exit"
-        elif self.beh.is_sleep_time() and not self.beh.is_hydrated(
-            self.session_params["min_reward"]
-        ):
+        elif self.beh.is_sleep_time() and not self.beh.is_hydrated(self.params['min_reward']):
             return 'Hydrate'
         elif self.beh.is_sleep_time() or self.beh.is_hydrated():
             return 'Offtime'
