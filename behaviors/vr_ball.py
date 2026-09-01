@@ -1,12 +1,9 @@
-from core.Behavior import *
-
-
 import datajoint as dj
 import numpy as np
 
-from ethopy.core.behavior import Behavior
+from ethopy.core.behavior import Behavior, BehCondition
 from ethopy.core.logger import behavior
-from ethopy.interfaces.ball import Ball
+from ethopy.interfaces.Ball import Ball
 
 
 
