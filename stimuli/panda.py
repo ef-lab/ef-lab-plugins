@@ -4,10 +4,13 @@ import time
 import datajoint as dj
 import numpy as np
 import panda3d.core as core
+from scipy import interpolate
 from direct.showbase.Loader import Loader
 from direct.showbase.ShowBase import ShowBase
 from direct.task import Task
 from panda3d.core import CardMaker, ClockObject, NodePath, TextureStage
+from direct.actor.Actor import Actor
+from typing import Any, Dict
 
 from ethopy.core.logger import stimulus
 from ethopy.core.stimulus import (
@@ -16,6 +19,7 @@ from ethopy.core.stimulus import (
 )  # import StimCondition need for the Panda class definition
 from ethopy.utils.helper_functions import iterable
 from ethopy.utils.timer import Timer
+
 
 @stimulus.schema
 class Objects(dj.Lookup):
@@ -27,16 +31,12 @@ class Objects(dj.Lookup):
     object=null          : longblob                     # 3d file
     file_name=null       : varchar(255)   
     source=null          : varchar(255) 
+    type='static'        : enum('static','morph','motion')     
     """
 
-    def store(self, obj_id, file_name, description=""):
-        tuple = dict(
-            obj_id=obj_id,
-            description=description,
-            object=np.fromfile(file_name, dtype=np.int8),
-            file_name=file_name,
-        )
-        self.insert1(tuple, replace=True)
+    def store(self, key: Dict[str, Any], replace=False):
+        key['object'] = np.fromfile(key['file_name'], dtype=np.int8)
+        self.insert1(key, replace=replace)
 
 
 @stimulus.schema
@@ -62,6 +62,7 @@ class Panda(Stimulus, dj.Manual):
         obj_dur               : int
         obj_occluder          : int
         perspective           : int
+        obj_animation=null        : blob
         """
 
     class Environment(dj.Part):
@@ -115,6 +116,7 @@ class Panda(Stimulus, dj.Manual):
         "obj_delay": 0,
         "obj_occluder": 0,
         "perspective": 0,
+        "obj_animation": None,
     }
 
     object_files, is_recording = dict(), False
@@ -144,11 +146,11 @@ class Panda(Stimulus, dj.Manual):
             "obj_delay": 0,
             "obj_occluder": 0,
             "perspective": 0,
+            "obj_animation": None,
         }
 
     def init(self, exp):
         super().init(exp)
-        self.object_files, self.is_recording = dict(), False
 
         # Lazily mix ShowBase into this instance's class so the Panda3D window
         # only opens when the stimulus runs. Flag-guarded with _showbase_mixed
@@ -242,8 +244,11 @@ class Panda(Stimulus, dj.Manual):
 
         # Set Object tasks
         self.objects = dict()
-        for idx, obj in enumerate(iterable(self.curr_cond["obj_id"])):
-            self.objects[idx] = Agent(self, self.get_cond("obj_", idx))
+        obj_ids = iterable(self.curr_cond["obj_id"])
+        single_object = len(obj_ids) == 1
+        for idx, _ in enumerate(obj_ids):
+            cond = self.get_cond("obj_", None if single_object else idx)
+            self.objects[idx] = Agent(self, cond)
 
         if "movie_name" in self.curr_cond:
             self.present_movie = True
@@ -282,7 +287,7 @@ class Panda(Stimulus, dj.Manual):
         self.flip()
         if (
             "obj_dur" in self.curr_cond
-            and self.curr_cond["obj_dur"] < self.timer.elapsed_time()
+            and np.max(self.curr_cond["obj_dur"]) < self.timer.elapsed_time()
         ):
             self.in_operation = False
 
@@ -374,11 +379,12 @@ class Panda(Stimulus, dj.Manual):
 
     def get_cond(self, cond_name, idx=0):
         return {
-            k.split(cond_name, 1)[1]: v
-            if type(v) is int or type(v) is float
-            else v[idx]
-            for k, v in self.curr_cond.items()
-            if k.startswith(cond_name)
+            key[len(cond_name):]: (
+                value if idx is None or np.isscalar(value) or value is None
+                else value[idx]
+            )
+            for key, value in self.curr_cond.items()
+            if key.startswith(cond_name)
         }
 
     def make_conditions(self, conditions):
@@ -423,6 +429,17 @@ class Panda(Stimulus, dj.Manual):
             schema="stimulus", table="Movie.Clip", key=key, fields=fields
         )
 
+    def interp(self, points, n_samples=100):
+        points = np.atleast_1d(np.asarray(points, dtype=float))
+
+        if points.size == 1:
+            return np.full(n_samples, points[0])
+
+        knot_times = np.linspace(0.0, 1.0, points.size)
+        sample_times = np.linspace(0.0, 1.0, n_samples)
+
+        return interpolate.PchipInterpolator(knot_times, points)(sample_times)
+
     def set_taskMgr(self):
         """
         Use this at the setup of pandas because for some reason the taskMgr the first time it
@@ -455,12 +472,39 @@ class Agent(Panda):
             cond["pos_y"], lambda x, t: np.arctan(x * hfov[0]) * self.z_loc
         )
         self.scale_fun = self.time_fun(cond["mag"], lambda x, t: 0.15 * x)
+        self.animation_fun = None
+        if cond.get("animation") is not None:
+            progress = np.atleast_1d(np.asarray(cond["animation"], dtype=float))
+            if progress.ndim != 1 or not progress.size or not np.isfinite(progress).all():
+                raise ValueError("animation must be a finite scalar or a nonempty 1-D sequence")
+            if progress.size == 1:
+                # Use a constant trajectory so fixed poses follow the same update path.
+                progress = np.repeat(progress, 2)
+            self.animation_fun = self.time_fun(progress)
         # add task object
         self.name = "Obj%s-Task" % cond["id"]
 
     def run(self):
         self.timer.start()
         self.model = self.env.loader.loadModel(self.env.object_files[self.cond["id"]])
+        self.animation_name = None
+        if self.animation_fun is not None and (
+            isinstance(self.model.node(), core.Character)
+            or not self.model.find("**/+Character").isEmpty()
+        ):
+            actor = Actor(self.model)
+            clips = actor.getAnimNames()
+            if clips:
+                clip = clips[0]
+                frame_count = actor.getNumFrames(clip)
+                if frame_count:
+                    self.model = actor
+                    self.animation_name = clip
+                    self.last_animation_frame = frame_count - 1
+                    self.pose_animation(self.animation_fun(0))
+            if self.animation_name is None:
+                actor.cleanup()
+
         self.model.reparentTo(self.env.render)
         if self.cond["occluder"]:
             self.model.setLightOff()
@@ -468,6 +512,11 @@ class Agent(Panda):
         self.task = self.env.taskMgr.doMethodLater(
             self.cond["delay"] / 1000, self.objTask, self.name
         )
+
+    def pose_animation(self, progress):
+        progress = float(np.clip(progress, 0.0, 1.0))
+        frame = round(progress * self.last_animation_frame)
+        self.model.pose(self.animation_name, frame)
 
     def objTask(self, task):
         t = self.timer.elapsed_time() / 1000
@@ -477,12 +526,18 @@ class Agent(Panda):
         self.model.setHpr(self.rot_fun(t), self.tilt_fun(t), self.yaw_fun(t))
         self.model.setPos(self.x_fun(t), self.z_loc, self.y_fun(t))
         self.model.setScale(self.scale_fun(t))
-
+        if self.animation_name is not None:
+            self.pose_animation(self.animation_fun(t))
         return Task.cont
 
     def remove(self, task):
+        if self.model.isEmpty():
+            return
         task.remove()
-        self.model.removeNode()
+        if isinstance(self.model, Actor):
+            self.model.cleanup()
+        else:
+            self.model.removeNode()
 
     def time_fun(self, param, fun=lambda x, t: x):
         param = iterable(param)
