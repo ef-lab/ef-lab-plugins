@@ -656,16 +656,25 @@ class Panda(Stimulus, dj.Manual):
             schema="stimulus", table="Movie.Clip", key=key, fields=fields
         )
 
-    def interp(self, points, n_samples=100):
+    @staticmethod
+    def interp(points, n_samples=100, bounds=None):
         points = np.atleast_1d(np.asarray(points, dtype=float))
+        if points.ndim != 1 or points.size == 0:
+            raise ValueError("points must be a nonempty one-dimensional sequence")
 
         if points.size == 1:
-            return np.full(n_samples, points[0])
+            samples = np.full(n_samples, points[0])
+        else:
+            knot_times = np.linspace(0.0, 1.0, points.size)
+            sample_times = np.linspace(0.0, 1.0, n_samples)
+            degree = min(3, points.size - 1)
+            spline = interpolate.splrep(knot_times, points, k=degree, s=0)
+            samples = interpolate.splev(sample_times, spline)
 
-        knot_times = np.linspace(0.0, 1.0, points.size)
-        sample_times = np.linspace(0.0, 1.0, n_samples)
+        if bounds is not None:
+            samples = np.clip(samples, *bounds)
 
-        return interpolate.PchipInterpolator(knot_times, points)(sample_times)
+        return samples
 
     def set_taskMgr(self):
         """
